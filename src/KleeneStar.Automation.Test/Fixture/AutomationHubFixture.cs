@@ -15,77 +15,10 @@ namespace KleeneStar.Automation.Test
     /// <see cref="ModelHub"/> to an isolated in-memory database and pre-populates the private
     /// manager backing fields so that <see cref="CoreHub.ClassManager"/> and siblings - and the
     /// plugin's <see cref="AutomationHub.AutomationManager"/> - resolve without touching any real
-    /// <see cref="IComponentHub"/>. The automation manager is registered as the core's
-    /// <see cref="CoreHub.Automation"/>, as the plugin does when it runs.
+    /// <see cref="IComponentHub"/>.
     /// </summary>
-    /// <remarks>A copy of the core test fixture (<c>KleeneStar.Core.Test</c>); keep the manager
-    /// list in step with it.</remarks>
     internal static class AutomationHubFixture
     {
-        private static readonly (string FieldName, Type ManagerType)[] _managers =
-        [
-            ("_workspaceManager", typeof(WorkspaceManager)),
-            ("_workspaceTemplateManager", typeof(WorkspaceTemplateManager)),
-            ("_classManager",     typeof(ClassManager)),
-            ("_fieldManager",     typeof(FieldManager)),
-            ("_securityLevelManager", typeof(SecurityLevelManager)),
-            ("_formManager",      typeof(FormManager)),
-            ("_priorityManager",  typeof(PriorityManager)),
-            ("_workflowManager",  typeof(WorkflowManager)),
-            ("_statusManager",    typeof(StatusManager)),
-            ("_objectManager",    typeof(ObjectManager)),
-            ("_insightManager", typeof(InsightManager)),
-            ("_kanbanBoardManager", typeof(KanbanBoardManager)),
-            ("_kindDashboardManager", typeof(KindDashboardManager)),
-            ("_tenantManager",    typeof(TenantManager)),
-            ("_navigatorLinkManager", typeof(NavigatorLinkManager)),
-            ("_maintenanceManager", typeof(MaintenanceManager)),
-            ("_brandingManager", typeof(BrandingManager)),
-            ("_customQuickfilterManager", typeof(CustomQuickfilterManager)),
-            ("_permissionManager", typeof(PermissionManager)),
-            ("_identityManager",  typeof(IdentityManager)),
-            ("_groupManager",     typeof(GroupManager)),
-            ("_slaManager",       typeof(SlaManager)),
-            ("_calendarManager",  typeof(CalendarManager)),
-            ("_commentManager",   typeof(CommentManager)),
-            ("_attachmentManager",typeof(AttachmentManager)),
-            ("_watcherManager",   typeof(WatcherManager)),
-            ("_shareManager",     typeof(ShareManager)),
-            ("_objectTagManager", typeof(ObjectTagManager)),
-            ("_objectDraftManager", typeof(ObjectDraftManager)),
-            ("_valueManager",     typeof(ValueManager)),
-            ("_commitManager",    typeof(CommitManager)),
-            ("_templateManager",  typeof(TemplateManager)),
-            ("_objectViewManager",typeof(ObjectViewManager)),
-            ("_objectRelationManager",typeof(ObjectRelationManager)),
-            ("_objectImpactManager",  typeof(ObjectImpactManager)),
-            ("_objectOperationManager", typeof(ObjectOperationManager)),
-            ("_objectProgressManager",typeof(ObjectProgressManager)),
-            ("_blueprintManager",   typeof(BlueprintManager)),
-            ("_objectKindManager",  typeof(ObjectKindManager)),
-            ("_objectRendererManager", typeof(ObjectRendererManager)),
-            ("_authenticationSourceManager", typeof(AuthenticationSourceManager)),
-            ("_insightViewTypeManager", typeof(InsightViewTypeManager)),
-            ("_integrationManager", typeof(IntegrationManager)),
-            ("_webhookManager",     typeof(WebhookManager)),
-            ("_approvalManager",    typeof(ApprovalManager)),
-            ("_planningManager",    typeof(PlanningManager)),
-            ("_valueCatalogManager", typeof(ValueCatalogManager)),
-            ("_workflowGuardManager", typeof(WorkflowGuardManager)),
-            ("_workflowValidatorManager",typeof(WorkflowValidatorManager)),
-            ("_workflowPostFunctionManager",typeof(WorkflowPostFunctionManager)),
-            ("_objectRelationTypeManager",typeof(ObjectRelationTypeManager)),
-            ("_sessionManager",   typeof(SessionManager)),
-            ("_wqlHistoryManager", typeof(WqlHistoryManager)),
-            ("_notificationCenterManager", typeof(NotificationCenterManager)),
-            ("_identitySessionManager", typeof(IdentitySessionManager)),
-            ("_accessTokenManager", typeof(AccessTokenManager)),
-            ("_credentialManager", typeof(CredentialManager)),
-            ("_savedSearchManager",typeof(SavedSearchManager)),
-            ("_sprintManager",    typeof(SprintManager)),
-            ("_auditManager",     typeof(AuditManager)),
-        ];
-
         /// <summary>
         /// Points <see cref="ModelHub"/> at an isolated in-memory database and seeds
         /// <see cref="CoreHub"/>'s private manager backing fields with freshly constructed
@@ -108,22 +41,18 @@ namespace KleeneStar.Automation.Test
                 ConnectionString = connectionString
             };
 
-            foreach (var (fieldName, managerType) in _managers)
+            // every manager of the core, found by reflection over CoreHub's backing fields, so the
+            // fixture never has to be kept in step with the core by hand
+            foreach (var field in typeof(CoreHub).GetFields(BindingFlags.NonPublic | BindingFlags.Static))
             {
-                var ctor = managerType.GetConstructor
-                (
-                    BindingFlags.Instance | BindingFlags.NonPublic,
-                    null,
-                    [typeof(IComponentHub), typeof(IHttpServerContext)],
-                    null
-                ) ?? throw new InvalidOperationException($"Private ctor not found on {managerType.FullName}.");
+                var ctor = field.FieldType.IsClass && !field.FieldType.IsAbstract && typeof(IComponentManager).IsAssignableFrom(field.FieldType)
+                    ? field.FieldType.GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(IComponentHub), typeof(IHttpServerContext)], null)
+                    : null;
 
-                var instance = ctor.Invoke([null, null]);
-
-                var field = typeof(CoreHub).GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)
-                    ?? throw new InvalidOperationException($"Backing field {fieldName} not found on CoreHub.");
-
-                field.SetValue(null, instance);
+                if (ctor is not null)
+                {
+                    field.SetValue(null, ctor.Invoke([null, null]));
+                }
             }
 
             // the plugin's managers; without a plugin manager each knows the items of its own
@@ -149,7 +78,7 @@ namespace KleeneStar.Automation.Test
             Plugin(typeof(AutomationTriggerManager), "_automationTriggerManager");
             Plugin(typeof(AutomationActionManager), "_automationActionManager");
 
-            CoreHub.Automation = (AutomationManager)Plugin(typeof(AutomationManager), "_automationManager");
+            Plugin(typeof(AutomationManager), "_automationManager");
         }
 
         /// <summary>

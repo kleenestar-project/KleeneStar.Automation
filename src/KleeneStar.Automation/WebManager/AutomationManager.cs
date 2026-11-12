@@ -1,10 +1,10 @@
 using KleeneStar.Automation.WebAutomation;
-using KleeneStar.Core.WebAutomation;
 using KleeneStar.Core;
 using KleeneStar.Core.WebManager;
 using KleeneStar.Core.WebQuickfilter;
 using KleeneStar.Model;
 using KleeneStar.Model.Entities;
+using ObjectEntity = KleeneStar.Model.Entities.Object;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -15,7 +15,6 @@ using WebExpress.WebCore;
 using WebExpress.WebCore.WebComponent;
 using WebExpress.WebIndex.Queries;
 using WebExpress.WebUI.WebControl;
-using ObjectEntity = KleeneStar.Model.Entities.Object;
 
 namespace KleeneStar.Automation.WebManager
 {
@@ -65,9 +64,15 @@ namespace KleeneStar.Automation.WebManager
         public const int MaxDepth = 3;
 
         /// <summary>
-        /// How long a worker holds a job it claimed.
+        /// How long a worker holds a job it claimed, from the claim or the last renewal.
         /// </summary>
         public static readonly TimeSpan Lease = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// How often a running job's lease is renewed: well inside the lease, so a slow action
+        /// does not let it run out while the worker is still at it.
+        /// </summary>
+        public static readonly TimeSpan LeaseRenewal = TimeSpan.FromSeconds(Lease.TotalSeconds / 3);
 
         /// <summary>
         /// How often a rule on the <c>sla.breached</c> trigger looks at its objects.
@@ -188,12 +193,6 @@ namespace KleeneStar.Automation.WebManager
         }
 
         /// <inheritdoc/>
-        IAutomationService IAutomationService.AddRule(AutomationRule rule)
-        {
-            return AddRule(rule);
-        }
-
-        /// <inheritdoc/>
         public IAutomationManager UpdateRule(AutomationRule rule)
         {
             Require(rule);
@@ -291,6 +290,9 @@ namespace KleeneStar.Automation.WebManager
                 Trigger = trigger,
                 Deduplication = Truncate($"{rule.Id:N}:{occurrence}", 256),
                 Depth = depth,
+                // the job runs the script as it was when the event happened; CompletedActions
+                // counts its lines, so an edit of the rule cannot shift them under a retry
+                Actions = rule.Actions,
                 State = AutomationJobState.Pending,
                 NextAttempt = DateTime.UtcNow,
                 Version = Guid.NewGuid(),
@@ -304,14 +306,25 @@ namespace KleeneStar.Automation.WebManager
         /// <inheritdoc/>
         public int ProcessDue(int limit = 20)
         {
-            var jobs = ModelHub.ClaimAutomationJobs(_worker, DateTime.UtcNow, Lease, limit);
+            var run = 0;
 
-            foreach (var job in jobs)
+            // each job is claimed right before it runs, so its lease starts with its work:
+            // claimed as a batch, the leases of the last jobs of a slow batch ran out before
+            // they started, and a second worker took them over while this one still meant to
+            foreach (var id in ModelHub.GetDueAutomationJobIds(DateTime.UtcNow, limit))
             {
+                var job = ModelHub.ClaimAutomationJob(id, _worker, DateTime.UtcNow, Lease);
+
+                if (job is null)
+                {
+                    continue;
+                }
+
                 Run(job);
+                run++;
             }
 
-            return jobs.Count;
+            return run;
         }
 
         /// <inheritdoc/>
@@ -357,7 +370,8 @@ namespace KleeneStar.Automation.WebManager
                 return null;
             }
 
-            // the actions already done stay done; the job continues after the last one
+            // the actions already done stay done; the job continues after the last one, in the
+            // script it was queued with - not in the rule's current text, which may have changed
             job.State = AutomationJobState.Pending;
             job.Attempts = 0;
             job.NextAttempt = DateTime.UtcNow;
@@ -394,8 +408,33 @@ namespace KleeneStar.Automation.WebManager
             CoreHub.CommitManager.CommitAdded += (_, commit) => Capture(() => OnCommit(commit));
             CoreHub.WorkflowManager.TransitionExecuted += (_, result) => Capture(() => OnTransition(result));
             CoreHub.CommentManager.CommentAdded += (_, comment) => Capture(() => OnComment(comment));
+            CoreHub.ApprovalManager.ApprovalOccurred += (_, occurrence) => Capture(() => OnApproval(occurrence));
 
             ConnectAudit();
+        }
+
+        /// <summary>
+        /// Turns an occurrence of an approval into the <c>approval.*</c> trigger it stands for.
+        /// </summary>
+        /// <param name="occurrence">The occurrence.</param>
+        private void OnApproval(KleeneStar.Core.WebApproval.ApprovalOccurrence occurrence)
+        {
+            var approval = occurrence?.Approval;
+
+            if (approval is null)
+            {
+                return;
+            }
+
+            var @event = occurrence.Kind switch
+            {
+                KleeneStar.Core.WebApproval.ApprovalOccurrenceKind.Requested => new AutomationEvent { Trigger = AutomationTriggerManager.ApprovalRequested, ObjectId = approval.ObjectId, Subjects = [approval.PolicyName], Occurrence = $"approval:{approval.Id:N}:requested", ActorId = occurrence.ActorId },
+                KleeneStar.Core.WebApproval.ApprovalOccurrenceKind.Completed => new AutomationEvent { Trigger = AutomationTriggerManager.ApprovalCompleted, ObjectId = approval.ObjectId, Subjects = [approval.State.ToString().ToLowerInvariant(), approval.PolicyName], Occurrence = $"approval:{approval.Id:N}:completed", ActorId = occurrence.ActorId },
+                // once per step: the occurrence names the step, so the next check queues nothing
+                _ => new AutomationEvent { Trigger = AutomationTriggerManager.ApprovalOverdue, ObjectId = approval.ObjectId, Subjects = [occurrence.StepName, approval.PolicyName], Occurrence = $"approval:{approval.Id:N}:overdue:{approval.CurrentStep}" }
+            };
+
+            Raise(@event);
         }
 
         /// <summary>
@@ -520,14 +559,61 @@ namespace KleeneStar.Automation.WebManager
 
             if (rule is null || rule.State != AutomationRuleState.Active || @object is null)
             {
-                Finish(job, AutomationJobState.Skipped, null);
+                Finish(job, AutomationJobState.Skipped, null, _worker);
                 return;
+            }
+
+            if (job.Actions is null)
+            {
+                // a job queued before the scripts were frozen: safe to freeze now while nothing
+                // has run; once actions are done, the rule's current text may no longer be the
+                // script they were counted against, and continuing could skip a failed action
+                if (job.CompletedActions > 0)
+                {
+                    Finish(job, AutomationJobState.Failed, $"The job was queued before its script was recorded and {job.CompletedActions} of its actions are done; the rule may have changed since, so it is not continued.", _worker);
+                    return;
+                }
+
+                job.Actions = rule.Actions ?? string.Empty;
             }
 
             var actor = rule.RunAsId ?? rule.CreatedById ?? Guid.Empty;
             var previous = _running.Value;
+            var lost = 0;
 
             _running.Value = job;
+
+            // the lease is renewed while the job runs, however long an action takes; a renewal
+            // that finds the job held by another worker marks it lost, and the job stops before
+            // its next action and writes nothing more
+            using var heartbeat = new Timer(_ =>
+            {
+                try
+                {
+                    if (ModelHub.RenewAutomationJob(job.Id, _worker, DateTime.UtcNow, Lease) is null)
+                    {
+                        Interlocked.Exchange(ref lost, 1);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // a failed renewal is retried by the next tick; the lease still has time
+                    _componentHub?.LogManager?.DefaultLog?.Warning($"The lease of automation job {job.Id} could not be renewed: {ex.Message}");
+                }
+            }, null, LeaseRenewal, LeaseRenewal);
+
+            bool Holds()
+            {
+                if (Volatile.Read(ref lost) == 1 || ModelHub.RenewAutomationJob(job.Id, _worker, DateTime.UtcNow, Lease) is null)
+                {
+                    Interlocked.Exchange(ref lost, 1);
+                    _componentHub?.LogManager?.DefaultLog?.Warning($"Automation job {job.Id} was taken over by another worker; this worker stops it.");
+
+                    return false;
+                }
+
+                return true;
+            }
 
             try
             {
@@ -536,10 +622,16 @@ namespace KleeneStar.Automation.WebManager
                 using var silent = CoreHub.BeginSilentNotifications();
                 using var activity = CoreHub.AuditManager?.BeginActivity(AuditOrigin.Automation, actor, $"automation:{rule.Id:N}");
 
-                var lines = AutomationScript.Parse(rule.Actions);
+                var lines = AutomationScript.Parse(job.Actions);
 
                 for (var index = job.CompletedActions; index < lines.Count; index++)
                 {
+                    // the job must still be this worker's before it acts again
+                    if (!Holds())
+                    {
+                        return;
+                    }
+
                     var line = lines[index];
                     var action = AutomationHub.AutomationActionManager.Get(line.Key)
                         ?? throw new InvalidOperationException($"Line {line.Number}: unknown action '{line.Key}'.");
@@ -560,14 +652,25 @@ namespace KleeneStar.Automation.WebManager
                     }, line.Argument);
 
                     job.CompletedActions = index + 1;
-                    ModelHub.UpdateAutomationJob(job);
+
+                    if (!ModelHub.UpdateAutomationJob(job, _worker))
+                    {
+                        Interlocked.Exchange(ref lost, 1);
+                        return;
+                    }
                 }
 
-                Finish(job, AutomationJobState.Succeeded, null);
+                heartbeat.Change(Timeout.Infinite, Timeout.Infinite);
+                Finish(job, AutomationJobState.Succeeded, null, _worker);
             }
             catch (Exception ex)
             {
-                Fail(job, ex);
+                heartbeat.Change(Timeout.Infinite, Timeout.Infinite);
+
+                if (Volatile.Read(ref lost) == 0)
+                {
+                    Fail(job, ex);
+                }
             }
             finally
             {
@@ -581,13 +684,14 @@ namespace KleeneStar.Automation.WebManager
         /// <param name="job">The job.</param>
         /// <param name="state">Its final state.</param>
         /// <param name="error">The error to keep, or <see langword="null"/>.</param>
-        private static void Finish(AutomationJob job, AutomationJobState state, string error)
+        /// <param name="worker">The worker that must still hold the job, or <see langword="null"/> for no check.</param>
+        private static void Finish(AutomationJob job, AutomationJobState state, string error, string worker)
         {
             job.State = state;
             job.LastError = error;
             job.LockedBy = null;
             job.LockedUntil = null;
-            ModelHub.UpdateAutomationJob(job);
+            ModelHub.UpdateAutomationJob(job, worker);
         }
 
         /// <summary>
@@ -601,7 +705,7 @@ namespace KleeneStar.Automation.WebManager
 
             if (job.Attempts >= MaxAttempts)
             {
-                Finish(job, AutomationJobState.Failed, message);
+                Finish(job, AutomationJobState.Failed, message, _worker);
                 JobFailed?.Invoke(this, job);
 
                 return;
@@ -612,7 +716,7 @@ namespace KleeneStar.Automation.WebManager
             job.LockedBy = null;
             job.LockedUntil = null;
             job.NextAttempt = DateTime.UtcNow + Backoff(job.Attempts);
-            ModelHub.UpdateAutomationJob(job);
+            ModelHub.UpdateAutomationJob(job, _worker);
         }
 
         /// <summary>

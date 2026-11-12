@@ -1,6 +1,5 @@
 using KleeneStar.Automation.WebAutomation;
 using KleeneStar.Automation.WebManager;
-using KleeneStar.Core.WebAutomation;
 using KleeneStar.Model;
 using KleeneStar.Model.Entities;
 using System.Diagnostics;

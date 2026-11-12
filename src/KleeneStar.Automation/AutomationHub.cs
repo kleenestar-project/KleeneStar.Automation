@@ -9,9 +9,9 @@ namespace KleeneStar.Automation
     /// </summary>
     /// <remarks>
     /// WebExpress resolves a component manager by its exact class, and the core cannot name a
-    /// class of this plugin, so the plugin's manager is reached here. The core reaches the same
-    /// instance through its contract, <see cref="CoreHub.Automation"/>, which the plugin sets when
-    /// it runs (<see cref="KleeneStarPlugin.Run"/>).
+    /// class of this plugin, so the plugin's manager is reached here - by this plugin and by the
+    /// plugins that extend it (<c>KleeneStar.Integration</c>, <c>KleeneStar.Templates</c>). The core
+    /// knows no automation.
     /// </remarks>
     public static class AutomationHub
     {

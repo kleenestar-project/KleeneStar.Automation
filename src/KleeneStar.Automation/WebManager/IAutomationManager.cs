@@ -1,8 +1,8 @@
-using KleeneStar.Core.WebAutomation;
+using KleeneStar.Automation.WebAutomation;
 using KleeneStar.Core;
 using KleeneStar.Model.Entities;
-using System.Collections.Generic;
 using System;
+using System.Collections.Generic;
 using WebExpress.WebCore.WebComponent;
 
 namespace KleeneStar.Automation.WebManager
@@ -12,11 +12,11 @@ namespace KleeneStar.Automation.WebManager
     /// the persistent queue that executes them.
     /// </summary>
     /// <remarks>
-    /// The part the core asks of it - raising an event, listing, validating and adding rules - is
-    /// the core's contract <see cref="IAutomationService"/>; the plugin registers this manager as
-    /// <see cref="KleeneStar.Core.CoreHub.Automation"/>.
+    /// The plugins that extend the platform use it directly through <see cref="AutomationHub"/>:
+    /// <c>KleeneStar.Integration</c> raises <c>integration.received</c>, <c>KleeneStar.Templates</c>
+    /// adds the rules of its workspace templates.
     /// </remarks>
-    public interface IAutomationManager : IComponentManager, IAutomationService
+    public interface IAutomationManager : IComponentManager
     {
         /// <summary>
         /// An event that fires when a rule is added.
@@ -46,11 +46,33 @@ namespace KleeneStar.Automation.WebManager
         AutomationRule GetRule(Guid ruleId);
 
         /// <summary>
+        /// Queues a job for every active rule the event satisfies.
+        /// </summary>
+        /// <param name="event">The event.</param>
+        /// <returns>How many jobs were queued; an occurrence delivered before queues none.</returns>
+        int Raise(AutomationEvent @event);
+
+        /// <summary>
+        /// Returns the rules of a workspace, or of the installation.
+        /// </summary>
+        /// <param name="workspaceId">The workspace, or <see langword="null"/> for every rule.</param>
+        /// <returns>The rules.</returns>
+        IReadOnlyList<AutomationRule> GetRules(Guid? workspaceId);
+
+        /// <summary>
+        /// Returns what keeps a rule from being saved: the trigger, the condition and every line
+        /// of the script are checked against the catalogs and the rule's class.
+        /// </summary>
+        /// <param name="rule">The rule.</param>
+        /// <returns>The problems; empty when the rule may be saved.</returns>
+        IReadOnlyList<string> Validate(AutomationRule rule);
+
+        /// <summary>
         /// Adds a rule.
         /// </summary>
         /// <param name="rule">The rule, valid.</param>
         /// <returns>The manager.</returns>
-        new IAutomationManager AddRule(AutomationRule rule);
+        IAutomationManager AddRule(AutomationRule rule);
 
         /// <summary>
         /// Writes the changes of a rule.

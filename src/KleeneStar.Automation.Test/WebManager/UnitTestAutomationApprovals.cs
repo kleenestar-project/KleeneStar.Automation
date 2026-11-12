@@ -1,7 +1,6 @@
 using KleeneStar.Core.WebApproval;
 using KleeneStar.Automation.WebAutomation;
 using KleeneStar.Automation.WebManager;
-using KleeneStar.Core.WebAutomation;
 using KleeneStar.Core.WebManager;
 using KleeneStar.Core.WebWorkflow;
 using KleeneStar.Model;
@@ -153,6 +152,9 @@ namespace KleeneStar.Automation.Test.WebManager
         {
             var database = nameof(Overdue_IsRaisedOncePerStep);
             Seed(database);
+
+            // the core announces the overdue step as ApprovalOccurred; the manager hears it once connected
+            AutomationHub.AutomationManager.Connect();
 
             var policy = Policy("Board: any group:CAB within 4h");
             var rule = new AutomationRule

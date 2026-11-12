@@ -14,12 +14,10 @@ namespace KleeneStar.Automation
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The core knows automation only through a small contract
-    /// (<c>KleeneStar.Core.WebAutomation</c>: <c>AutomationEvent</c>, <c>AutomationTriggers</c>,
-    /// <c>IAutomationService</c>): it raises its events through <see cref="CoreHub.Automation"/>
-    /// and lets a workspace template add its rules there. This plugin is what answers: when it
-    /// runs, it registers its manager as that service, subscribes it to the commits, transitions
-    /// and comments the triggers are raised from, audits its rules and failed jobs, starts the
+    /// The core knows no automation: it announces what happens in its own events (commits,
+    /// transitions, comments, <c>IApprovalManager.ApprovalOccurred</c>), and this plugin listens.
+    /// When it runs, it subscribes its manager to the events the triggers are raised from,
+    /// audits its rules and failed jobs, starts the
     /// worker that runs the queue. Its pages refuse a caller themselves
     /// (<see cref="AutomationAuthorization"/>, a WebExpress <c>ForbiddenException</c> from
     /// <c>Process</c>), and its entry of the
@@ -63,14 +61,12 @@ namespace KleeneStar.Automation
         /// </remarks>
         public void Run()
         {
-
             try
             {
                 var manager = AutomationHub.AutomationManager
                     ?? throw new InvalidOperationException("The automation manager is not registered.");
 
                 manager.Connect();
-                CoreHub.Automation = manager;
 
                 _worker = new AutomationWorker();
             }
@@ -81,18 +77,13 @@ namespace KleeneStar.Automation
         }
 
         /// <summary>
-        /// Stops the queue and disconnects the platform from the core. A job the worker was
+        /// Stops the queue. A job the worker was
         /// running finishes; one it had not started stays queued.
         /// </summary>
         public void Dispose()
         {
             _worker?.Dispose();
             _worker = null;
-
-            if (ReferenceEquals(CoreHub.Automation, AutomationHub.AutomationManager))
-            {
-                CoreHub.Automation = null;
-            }
         }
     }
 }

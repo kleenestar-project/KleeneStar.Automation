@@ -19,10 +19,10 @@ namespace KleeneStar.Automation.Test.WebManager
         {
             AutomationHubFixture.Initialize(nameof(PlatformItems_AreCollected));
 
-            Assert.Equal(11, AutomationHub.AutomationTriggerManager.Triggers.Count);
+            Assert.Equal(10, AutomationHub.AutomationTriggerManager.Triggers.Count);
             Assert.True(AutomationHub.AutomationTriggerManager.Get(AutomationTriggerManager.Schedule)?.Scheduled);
             Assert.Equal(
-                ["approval", "archive", "assign", "comment", "escalate", "notify", "postfunction", "set", "subtask", "transition", "webhook"],
+                ["approval", "archive", "assign", "comment", "escalate", "notify", "postfunction", "set", "subtask", "transition"],
                 AutomationHub.AutomationActionManager.All.Select(x => x.Key));
         }
 

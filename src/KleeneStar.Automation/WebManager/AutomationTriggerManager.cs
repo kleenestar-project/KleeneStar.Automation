@@ -1,28 +1,30 @@
 ﻿using KleeneStar.Automation.WebAutomation;
-using KleeneStar.Core.WebAutomation;
-using KleeneStar.Core.WebManager;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using WebExpress.WebCore;
 using WebExpress.WebCore.WebComponent;
+using WebExpress.WebCore.WebPlugin;
 
 namespace KleeneStar.Automation.WebManager
 {
     /// <summary>
-    /// The triggers an automation rule can react to, collected from the plugins
-    /// (<see cref="PluginItemManager{TItem}"/>): the platform's own
+    /// The triggers an automation rule can react to, collected from the plugins by WebExpress's
+    /// <see cref="PluginTypeCatalog{TItem}"/>: the platform's own
     /// (<c>WebAutomation/Triggers</c>) and every <c>public sealed</c> <see cref="IAutomationTrigger"/>
     /// a plugin ships - an integration its incoming events. There is no enum of triggers.
     /// Formerly the static <c>AutomationTriggerManager</c>.
     /// </summary>
     /// <remarks>
-    /// The core raises some of them itself (approvals, incoming webhooks) and names them by the
-    /// keys of <see cref="AutomationTriggers"/>; this manager labels them and offers them to a rule.
+    /// The approval triggers are raised on the core's approval event, the incoming events of
+    /// other systems by <c>KleeneStar.Integration</c>; this manager labels them and offers them to
+    /// a rule.
     /// </remarks>
-    public sealed class AutomationTriggerManager : PluginItemManager<IAutomationTrigger>, IAutomationTriggerManager
+    public sealed class AutomationTriggerManager : IAutomationTriggerManager
     {
+        private readonly PluginTypeCatalog<IAutomationTrigger> _catalog = new(x => x.Key);
+
         /// <summary>An object was created.</summary>
         public const string ObjectCreated = "object.created";
 
@@ -41,22 +43,17 @@ namespace KleeneStar.Automation.WebManager
         /// <summary>The scheduler runs the rule every so many minutes over the objects of its scope.</summary>
         public const string Schedule = "schedule";
 
-        /// <summary>
-        /// The key of the trigger another system raises through an incoming webhook (raised by the core).
-        /// </summary>
-        public const string IntegrationReceived = AutomationTriggers.IntegrationReceived;
-
         /// <summary>The key of the trigger the scheduler raises when a service level target passes its warning threshold.</summary>
         public const string SlaAtRisk = "sla.atrisk";
 
-        /// <summary>The key of the trigger raised when an approval is requested (raised by the core).</summary>
-        public const string ApprovalRequested = AutomationTriggers.ApprovalRequested;
+        /// <summary>The key of the trigger raised when an approval is requested.</summary>
+        public const string ApprovalRequested = "approval.requested";
 
-        /// <summary>The key of the trigger raised when an approval ends (raised by the core).</summary>
-        public const string ApprovalCompleted = AutomationTriggers.ApprovalCompleted;
+        /// <summary>The key of the trigger raised when an approval ends.</summary>
+        public const string ApprovalCompleted = "approval.completed";
 
-        /// <summary>The key of the trigger raised when a step of an approval took longer than it may (raised by the core).</summary>
-        public const string ApprovalOverdue = AutomationTriggers.ApprovalOverdue;
+        /// <summary>The key of the trigger raised when a step of an approval took longer than it may.</summary>
+        public const string ApprovalOverdue = "approval.overdue";
 
         /// <summary>
         /// Initializes a new instance of the manager. Invoked by WebExpress via reflection.
@@ -65,25 +62,45 @@ namespace KleeneStar.Automation.WebManager
         /// <param name="httpServerContext">The HTTP server context.</param>
         [SuppressMessage("CodeQuality", "IDE0051:Remove unused private members", Justification = "Used via reflection.")]
         private AutomationTriggerManager(IComponentHub componentHub, IHttpServerContext httpServerContext)
-            : base(componentHub, httpServerContext)
         {
+            if (componentHub?.PluginManager is not null)
+            {
+                _catalog.Attach(componentHub, httpServerContext);
+            }
+            else
+            {
+                // without a plugin manager (a test fixture) the manager knows its own assembly's items
+                _catalog.Collect(typeof(AutomationTriggerManager).Assembly);
+            }
         }
 
         /// <inheritdoc/>
-        protected override string KeyOf(IAutomationTrigger item)
-        {
-            ArgumentException.ThrowIfNullOrWhiteSpace(item.Key);
-
-            return item.Key.Trim();
-        }
-
-        /// <inheritdoc/>
-        public IReadOnlyList<IAutomationTrigger> Triggers => [.. Snapshot().OrderBy(x => x.Key, StringComparer.Ordinal)];
+        public IReadOnlyList<IAutomationTrigger> Triggers => [.. _catalog.Items.OrderBy(x => x.Key, StringComparer.Ordinal)];
 
         /// <inheritdoc/>
         public IAutomationTrigger Get(string key)
         {
-            return Find(key);
+            return _catalog.Find(key);
+        }
+
+        /// <summary>
+        /// Gets a number that moves on every change of the items, so a cached picker can tell
+        /// that an item arrived or left after it was built.
+        /// </summary>
+        public long Version => _catalog.Version;
+
+        /// <inheritdoc/>
+        public void Register(IAutomationTrigger item)
+        {
+            _catalog.Register(item);
+        }
+
+        /// <summary>
+        /// Stops following the plugins.
+        /// </summary>
+        public void Dispose()
+        {
+            _catalog.Dispose();
         }
 
         /// <summary>

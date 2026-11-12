@@ -154,20 +154,6 @@ namespace KleeneStar.Automation.WebAutomation.Triggers
     }
 
     /// <summary>
-    /// Another system reported an event through an incoming webhook (raised by the core); the parameter narrows to the event or the hook.
-    /// </summary>
-    public sealed class IntegrationReceivedTrigger : AutomationTrigger
-    {
-        /// <summary>
-        /// Initializes a new instance of the class.
-        /// </summary>
-        public IntegrationReceivedTrigger()
-            : base(AutomationTriggerManager.IntegrationReceived, "kleenestar.automation:automation.trigger.integration.received", "kleenestar.automation:automation.trigger.integration.received.parameter")
-        {
-        }
-    }
-
-    /// <summary>
     /// The scheduler runs the rule every so many minutes over the objects of its scope; the parameter is the interval.
     /// </summary>
     public sealed class ScheduleTrigger : AutomationTrigger

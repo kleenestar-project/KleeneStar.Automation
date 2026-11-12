@@ -1,6 +1,5 @@
 using KleeneStar.Automation.WebAutomation;
 using KleeneStar.Automation.WebManager;
-using KleeneStar.Core.WebAutomation;
 using KleeneStar.Core.WebControl;
 using KleeneStar.Core.WebParameter;
 using KleeneStar.Core;

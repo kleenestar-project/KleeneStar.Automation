@@ -1,5 +1,4 @@
 using KleeneStar.Automation.WebAutomation;
-using KleeneStar.Core.WebAutomation;
 using KleeneStar.Automation.WebManager;
 using KleeneStar.Core.WebManager;
 using KleeneStar.Model;
@@ -338,6 +337,206 @@ namespace KleeneStar.Automation.Test.WebManager
             }
 
             Assert.Contains(AutomationHub.AutomationManager.Validate(new AutomationRule { Name = "x", WorkspaceId = WorkspaceId, Trigger = AutomationTriggerManager.ObjectCreated, Actions = "archive soon" }), x => x.StartsWith("Line 1:", StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// A test action that runs a callback, so a test can look at the queue - or interfere
+        /// with it - while a job is in the middle of its script.
+        /// </summary>
+        private sealed class ProbeAction : IAutomationAction
+        {
+            public static Action<AutomationActionContext> OnExecute { get; set; }
+
+            public string Key => "test.probe";
+
+            public string Syntax => "test.probe";
+
+            public string Validate(string argument, Class @class) => null;
+
+            public void Execute(AutomationActionContext context, string argument) => OnExecute?.Invoke(context);
+        }
+
+        /// <summary>
+        /// The worker claims a job right before it runs it: while the first job of a batch
+        /// runs, the next one is still pending and carries no lease that could run out before
+        /// its turn.
+        /// </summary>
+        [Fact]
+        public void ProcessDue_ClaimsEachJobRightBeforeItRuns()
+        {
+            var database = nameof(ProcessDue_ClaimsEachJobRightBeforeItRuns);
+            Seed(database);
+            AutomationHub.AutomationActionManager.Register(new ProbeAction());
+
+            var first = Object(database, ClassId, "First");
+            var second = Object(database, ClassId, "Second");
+            var rule = Rule(AutomationTriggerManager.ObjectCreated, "test.probe");
+            var seen = new List<(Guid Job, AutomationJobState Other)>();
+
+            ProbeAction.OnExecute = context =>
+            {
+                var other = JobsOf(rule).Single(x => x.Id != context.Job.Id);
+                seen.Add((context.Job.Id, other.State));
+            };
+
+            try
+            {
+                AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = first, Occurrence = "commit:lease-1" });
+                AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = second, Occurrence = "commit:lease-2" });
+
+                Assert.Equal(2, AutomationHub.AutomationManager.ProcessDue());
+            }
+            finally
+            {
+                ProbeAction.OnExecute = null;
+            }
+
+            Assert.Equal(2, seen.Count);
+            Assert.Equal(AutomationJobState.Pending, seen[0].Other);
+            Assert.Equal(AutomationJobState.Succeeded, seen[1].Other);
+            Assert.All(JobsOf(rule), x => Assert.Equal(AutomationJobState.Succeeded, x.State));
+        }
+
+        /// <summary>
+        /// A worker whose job was taken over after its lease ran out stops before its next
+        /// action and writes nothing over the new holder's state.
+        /// </summary>
+        [Fact]
+        public void TakenOverJob_StopsAndWritesNothing()
+        {
+            var database = nameof(TakenOverJob_StopsAndWritesNothing);
+            Seed(database);
+            AutomationHub.AutomationActionManager.Register(new ProbeAction());
+
+            var objectId = Object(database, ClassId, "Taken over");
+            var rule = Rule(AutomationTriggerManager.ObjectCreated, "test.probe\nset Impact=High");
+
+            // while the first action runs, the lease runs out and another worker claims the job
+            ProbeAction.OnExecute = context =>
+            {
+                Assert.NotNull(ModelHub.ClaimAutomationJob(context.Job.Id, "intruder", DateTime.UtcNow + AutomationManager.Lease + TimeSpan.FromMinutes(1), AutomationManager.Lease));
+            };
+
+            try
+            {
+                AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = objectId, Occurrence = "commit:takeover" });
+                AutomationHub.AutomationManager.ProcessDue();
+            }
+            finally
+            {
+                ProbeAction.OnExecute = null;
+            }
+
+            var job = Assert.Single(JobsOf(rule));
+
+            Assert.Equal(AutomationJobState.Running, job.State);
+            Assert.Equal("intruder", job.LockedBy);
+            Assert.Equal(0, job.CompletedActions);
+            Assert.Null(CoreHub.ValueManager.GetValue(objectId, ImpactFieldId)?.Data);
+        }
+
+        /// <summary>
+        /// The holder of a job may renew and write it; once another worker took it over, the
+        /// former holder can do neither.
+        /// </summary>
+        [Fact]
+        public void Lease_BelongsToItsHolder()
+        {
+            var database = nameof(Lease_BelongsToItsHolder);
+            Seed(database);
+
+            var objectId = Object(database, ClassId, "Holder");
+            Rule(AutomationTriggerManager.ObjectCreated, "set Impact=Medium");
+            AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = objectId, Occurrence = "commit:holder" });
+
+            var now = DateTime.UtcNow;
+            var job = Assert.Single(ModelHub.ClaimAutomationJobs("worker-a", now, TimeSpan.FromMinutes(5), 10));
+
+            Assert.NotNull(ModelHub.RenewAutomationJob(job.Id, "worker-a", now.AddMinutes(4), TimeSpan.FromMinutes(5)));
+            Assert.Null(ModelHub.ClaimAutomationJob(job.Id, "worker-b", now.AddMinutes(6), TimeSpan.FromMinutes(5)));
+
+            // the renewal held: only after it ran out can another worker take the job
+            Assert.NotNull(ModelHub.ClaimAutomationJob(job.Id, "worker-b", now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+
+            job.CompletedActions = 1;
+            Assert.False(ModelHub.UpdateAutomationJob(job, "worker-a"));
+            Assert.Null(ModelHub.RenewAutomationJob(job.Id, "worker-a", now.AddMinutes(10), TimeSpan.FromMinutes(5)));
+            Assert.True(ModelHub.UpdateAutomationJob(job, "worker-b"));
+        }
+
+        /// <summary>
+        /// A retry continues the script the job was queued with: removing the first line of the
+        /// rule after the second one failed must not let the retry skip the failed action.
+        /// </summary>
+        [Fact]
+        public void Retry_RunsTheScriptTheJobWasQueuedWith()
+        {
+            var database = nameof(Retry_RunsTheScriptTheJobWasQueuedWith);
+            Seed(database);
+
+            var objectId = Object(database, ClassId, "Frozen");
+            var rule = Rule(AutomationTriggerManager.ObjectCreated, "set Impact=Low\ntransition Done");
+
+            AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = objectId, Occurrence = "commit:frozen" });
+            AutomationHub.AutomationManager.ProcessDue();
+
+            var failed = Assert.Single(JobsOf(rule));
+            Assert.Equal(1, failed.CompletedActions);
+            Assert.Equal("set Impact=Low\ntransition Done", failed.Actions);
+
+            // the rule loses its first line; the job keeps its own script
+            rule.Actions = "transition Done";
+            AutomationHub.AutomationManager.UpdateRule(rule);
+
+            failed.NextAttempt = DateTime.UtcNow.AddSeconds(-1);
+            ModelHub.UpdateAutomationJob(failed);
+            AutomationHub.AutomationManager.ProcessDue();
+
+            var job = Assert.Single(JobsOf(rule));
+            Assert.NotEqual(AutomationJobState.Succeeded, job.State);
+            Assert.Equal(1, job.CompletedActions);
+            Assert.Contains("workflow", job.LastError, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// A job queued before scripts were recorded is not continued after some of its actions
+        /// ran - the rule may have changed - but one that has not started freezes the rule's text.
+        /// </summary>
+        [Fact]
+        public void JobWithoutScript_ContinuesOnlyFromTheStart()
+        {
+            var database = nameof(JobWithoutScript_ContinuesOnlyFromTheStart);
+            Seed(database);
+
+            var started = Object(database, ClassId, "Legacy started");
+            var fresh = Object(database, ClassId, "Legacy fresh");
+            var rule = Rule(AutomationTriggerManager.ObjectCreated, "set Impact=Low");
+
+            AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = started, Occurrence = "commit:legacy-1" });
+            AutomationHub.AutomationManager.Raise(new AutomationEvent { Trigger = AutomationTriggerManager.ObjectCreated, ObjectId = fresh, Occurrence = "commit:legacy-2" });
+
+            // turn both into jobs of the time before the column: no script, one of them half done
+            using (var db = AutomationHubFixture.CreateDbContext(database))
+            {
+                foreach (var stored in db.AutomationJobs.Where(x => x.RuleId == rule.Id))
+                {
+                    stored.Actions = null;
+                    stored.CompletedActions = stored.ObjectId == started ? 1 : 0;
+                }
+
+                db.SaveChanges();
+            }
+
+            AutomationHub.AutomationManager.ProcessDue();
+
+            var jobs = JobsOf(rule);
+            var halfDone = jobs.Single(x => x.ObjectId == started);
+            var notStarted = jobs.Single(x => x.ObjectId == fresh);
+
+            Assert.Equal(AutomationJobState.Failed, halfDone.State);
+            Assert.Contains("script", halfDone.LastError, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(AutomationJobState.Succeeded, notStarted.State);
+            Assert.Equal("set Impact=Low", notStarted.Actions);
         }
     }
 }
