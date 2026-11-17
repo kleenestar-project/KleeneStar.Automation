@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="KleeneStar.Automation.Test/KleeneStar.Automation.Test.csproj" />
+  <Project Path="KleeneStar.Automation/KleeneStar.Automation.csproj" />
+</Solution>
