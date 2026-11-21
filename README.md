@@ -51,7 +51,7 @@ dotnet build KleeneStar.Automation/src/KleeneStar.Automation/KleeneStar.Automati
 
 ```
 dotnet build KleeneStar.Automation/src/KleeneStar.Automation.Test
-KleeneStar.Automation/src/KleeneStar.Automation.Test/bin/Debug/net10.0/KleeneStar.Automation.Test.exe
+KleeneStar.Automation/src/KleeneStar.Automation.Test/bin/Debug/net11.0/KleeneStar.Automation.Test.exe
 ```
 
 The load test (`UnitTestAutomationLoad`) is opt-in: `KLEENESTAR_LOAD=1`.
